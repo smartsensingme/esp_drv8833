@@ -1,0 +1,4 @@
+# C3 SuperMini tested here: embedded 4 MB flash; ROM flashing works while
+# esptool 5.4.0 stalls when starting the stub on this board/setup.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_NO_STUB=y

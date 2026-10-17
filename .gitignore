@@ -1,0 +1,16 @@
+# ESP-IDF generated build/configuration files.
+build*/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# Local repository guidance and wiring notes.
+AGENTS.md
+pins.txt
+
+# Board reference directories (including the alternate spelling).
+esp32-*/
+exp32-*/
+
+# macOS metadata.
+.DS_Store

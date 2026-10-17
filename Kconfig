@@ -1,0 +1,31 @@
+menu "DRV8833 motor driver"
+    choice DRV8833_PWM_BACKEND
+        prompt "PWM peripheral"
+        default DRV8833_PWM_MCPWM if SOC_MCPWM_SUPPORTED
+        default DRV8833_PWM_LEDC
+        help
+            Both peripherals generate PWM in hardware without a per-edge ISR.
+            MCPWM provides a motor-control time base on supported chips (S3).
+            LEDC also works on C3. This choice applies to all driver instances.
+
+    config DRV8833_PWM_LEDC
+        bool "LEDC"
+        help
+            Use one exclusively reserved timer and four consecutive low-speed
+            channels per instance. The supported C3/S3 implementation uses the
+            40 MHz XTAL clock and automatically selects duty resolution.
+            Other LEDC consumers must use a compatible shared clock source.
+            Timer/channel indexes are instance fields in the C configuration.
+
+    config DRV8833_PWM_MCPWM
+        bool "MCPWM"
+        depends on SOC_MCPWM_SUPPORTED
+        help
+            Allocate one timer, two operators and four comparator/generator
+            pairs per instance on the selected group. Uses an 80 MHz tick rate
+            and integer periods; gives 4000 duty steps at 20 kHz on S3.
+            ULT remains a GPIO notification: this backend does not install
+            a hardware fault/brake action. The group is selected in C.
+
+    endchoice
+endmenu

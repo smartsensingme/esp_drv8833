@@ -1,0 +1,49 @@
+menu "DRV8833 basic example"
+    config EXAMPLE_DRV8833_IN1
+        int "IN1 GPIO"
+        default 0
+        help
+            Exclusive output GPIO wired to physical IN1 of bridge A (Motor 1).
+            Logical wheel identity and inversion are configured in main.c.
+
+    config EXAMPLE_DRV8833_IN2
+        int "IN2 GPIO"
+        default 1
+        help
+            Exclusive output GPIO wired to physical IN2 of bridge A (Motor 1).
+            Must differ from every other configured motor/control GPIO.
+
+    config EXAMPLE_DRV8833_IN3
+        int "IN3 GPIO"
+        default 2
+        help
+            Exclusive output GPIO wired to physical IN3 of bridge B (Motor 2).
+            GPIO2 is a strapping pin on C3; verify the board can boot with the
+            attached circuit. A valid GPIO number need not be free on a board.
+
+    config EXAMPLE_DRV8833_IN4
+        int "IN4 GPIO"
+        default 3
+        help
+            Exclusive output GPIO wired to physical IN4 of bridge B (Motor 2).
+            Board pin labels/locations differ between C3 and S3 modules.
+
+    config EXAMPLE_DRV8833_SLEEP
+        int "EEP GPIO (-1 when disconnected)"
+        default 10
+        help
+            Optional nSLEEP output. Set -1 when not connected to the ESP32.
+            Both zero commands drive it low; waking adds a 1 ms startup wait.
+            Without this GPIO the module must keep nSLEEP enabled in hardware.
+
+    config EXAMPLE_DRV8833_FAULT
+        int "ULT GPIO (-1 when disconnected)"
+        default 7
+        help
+            Optional active-low nFAULT input with an internal pull-up.
+            Set -1 to omit the input ISR and fault worker. When enabled, one
+            worker task and GPIO handler report a latched event plus temporal
+            context. The application acknowledges the signal and decides its
+            response; ULT never automatically stops motors or inhibits commands.
+
+endmenu
