@@ -174,17 +174,9 @@ callback, conforme o teste de bancada; não para os motores. Para testar com
 ULT, conecte-o ao GPIO configurado
 (padrão GPIO7); `fault_gpio = -1` continua disponível para uso sem esse sinal.
 
-Exemplo de tratamento explícito pela aplicação, após consultar o estado:
-
-```c
-esp_drv8833_state_t state;
-ESP_ERROR_CHECK(esp_drv8833_get_state(driver, &state));
-if (state.fault_latched && !state.fault_event_pending) {
-    // Política opcional da aplicação: parar antes de reconhecer.
-    ESP_ERROR_CHECK(esp_drv8833_coast(driver));
-    ESP_ERROR_CHECK(esp_drv8833_clear_fault(driver));
-}
-```
+Não use apenas `fault_latched` ou `fault_pin_low` para decidir uma parada quando
+a política escolhida distingue sinais associados a transições. Consulte
+`last_fault_event.context` conforme o exemplo de polling abaixo.
 
 Erros de escrita de PWM/GPIO continuam retornando erro ao chamador e provocam
 uma tentativa de parada de ambos. Eles não marcam o latch ULT nem geram seu
@@ -212,6 +204,7 @@ o driver não presume que um pulso durante uma transição seja inofensivo.
 | `ESP_DRV8833_FAULT_CONTEXT_MOTOR_START` | Uma roda passou de comando zero para não zero com a ponte já acordada, ou sem EEP configurado. |
 | `ESP_DRV8833_FAULT_CONTEXT_COAST` | Uma ou ambas as rodas passaram para zero, incluindo EEP alto → baixo quando ambas param; também uma tentativa de parada por erro quando havia acionamento. |
 | `ESP_DRV8833_FAULT_CONTEXT_REVERSAL` | Inversão direta do sinal de um comando não nulo, incluindo o intervalo de coast intermediário. |
+| `ESP_DRV8833_FAULT_CONTEXT_BRAKE` | Entrada explícita em frenagem elétrica, com as duas entradas de cada ponte em HIGH. |
 
 `fault_context_window_us` define a janela **após terminar a operação**, 2000 us
 por padrão. Eventos durante a operação também recebem seu contexto, mesmo se
@@ -245,17 +238,74 @@ maior que o congelado no evento. A leitura de estado copia o snapshot sob
 sincronização; timestamps e metadados acrescentam custo limitado à ISR e às
 transições, a medir na validação de hardware.
 
-Exemplo de seleção de política no callback:
+### Exemplo opcional: parar somente por ULT sem contexto conhecido
+
+Em módulos nos quais a bancada mostra ULT durante partida, coast ou reversão,
+uma política de aplicação é **registrar e reconhecer essas sinalizações sem
+parar automaticamente os motores**. Use o contexto capturado pelo driver:
+
+| Contexto | Tratamento desta política |
+| --- | --- |
+| INITIALIZATION, WAKE, MOTOR_START, COAST, REVERSAL, BRAKE | Telemetria e reconhecimento; sem parada automática por esse evento |
+| NONE ou valor não reconhecido | Solicitar parada/inibição e registrar como ULT de origem desconhecida |
+
+A classificação indica associação temporal, não diagnóstico elétrico. A janela
+`fault_context_window_us` deve corresponder às transições observadas no módulo.
+Esta é uma política opcional do consumidor: o driver continua notificando e não
+passa a bloquear comandos por conta própria. Erros das APIs/PWM/GPIO continuam
+sendo tratados separadamente, conforme seus retornos.
+
+Exemplo de avaliação por polling, para executar no proprietário do hardware:
 
 ```c
-if (event->context == ESP_DRV8833_FAULT_CONTEXT_NONE) {
-    // Tratar conforme a política da aplicação; por exemplo, parar:
-    ESP_ERROR_CHECK(esp_drv8833_coast(driver));
-} else {
-    // Registrar a associação; ela não comprova ausência de falha real.
+static bool ult_context_known(esp_drv8833_fault_context_t context)
+{
+    switch (context) {
+    case ESP_DRV8833_FAULT_CONTEXT_INITIALIZATION:
+    case ESP_DRV8833_FAULT_CONTEXT_WAKE:
+    case ESP_DRV8833_FAULT_CONTEXT_MOTOR_START:
+    case ESP_DRV8833_FAULT_CONTEXT_COAST:
+    case ESP_DRV8833_FAULT_CONTEXT_REVERSAL:
+    case ESP_DRV8833_FAULT_CONTEXT_BRAKE:
+        return true;
+    case ESP_DRV8833_FAULT_CONTEXT_NONE:
+    default:
+        return false;
+    }
 }
-ESP_ERROR_CHECK(esp_drv8833_clear_fault(driver));
+
+static esp_err_t evaluate_ult(esp_drv8833_handle_t driver, bool *request_stop)
+{
+    if (request_stop == NULL) return ESP_ERR_INVALID_ARG;
+    esp_drv8833_state_t state;
+    esp_err_t error = esp_drv8833_get_state(driver, &state);
+    if (error != ESP_OK) return error;
+
+    *request_stop = (state.fault_latched || state.fault_pin_low) &&
+                   !ult_context_known(state.last_fault_event.context);
+
+    /* Registrar o evento antes de reconhecer. Não formatar logs no controle. */
+    if (state.fault_latched && !state.fault_event_pending)
+        return esp_drv8833_clear_fault(driver);
+    return ESP_OK;
+}
 ```
+
+O chamador aplica a parada/inibição quando `request_stop` for verdadeiro e trata
+o erro retornado pela função. Se houver latch de falha na aplicação, reconhecer
+o latch do driver não deve limpá-lo nem retomar o movimento automaticamente.
+
+Um ULT associado que permanece LOW continua associado ao último evento após
+`clear_fault()`. Não o reclassifique como desconhecido apenas porque o latch foi
+reconhecido. Quando o nível volta a HIGH e ocorre outra borda de descida, a nova
+captura recebe seu próprio contexto. Sem sinal LOW e sem latch, um evento antigo
+armazenado não deve causar parada. Não reconheça enquanto `fault_event_pending`
+for verdadeiro: aguarde o worker copiar o evento, ou reconheça no callback.
+
+Para contagem, registre cada captura aceita uma única vez usando timestamp e
+contador de bordas do evento; não conte cada consulta repetida do mesmo latch.
+Bordas suprimidas enquanto o latch está ocupado não possuem contexto individual:
+esta telemetria não é um registro completo de todos os pulsos.
 
 ### Mudança de comportamento na versão 0.2.0
 
@@ -545,3 +595,27 @@ Use captura externa para medir o intervalo ULT → tratamento pela aplicação.
 Referências: [DRV8833](https://www.ti.com/lit/ds/symlink/drv8833.pdf),
 [MCPWM S3](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32s3/api-reference/peripherals/mcpwm.html),
 [LEDC C3](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32c3/api-reference/peripherals/ledc.html).
+
+## Frenagem explícita e coast acordado
+
+`esp_drv8833_brake(driver)` mantém IN1..4 em HIGH estático, EEP acordado:
+ambas as saídas de cada ponte ficam LOW (frenagem elétrica, tabela 1 do
+[datasheet TI](https://www.ti.com/lit/ds/symlink/drv8833.pdf)). Não é comando de
+velocidade nem duty reverso. `state.braking` distingue esse estado de duty zero.
+LEDC usa idle HIGH e MCPWM force HIGH, sem depender do endpoint de duty PWM.
+As escritas são sequenciais e passam por estados intermediários de drive;
+medir pulsos de transição e corrente na bancada antes de validar o uso.
+
+A aplicação deve impor tempo máximo finito e terminar a frenagem mesmo com
+sensor inválido. O driver não cria temporizador nem decide a duração.
+`esp_drv8833_coast_awake()` deixa entradas LOW e EEP HIGH; a chamada antiga
+`esp_drv8833_coast()` conserva o comportamento de sleep quando EEP existe.
+Um comando de drive passa por coast ao sair de brake. Erros tentam coast/sleep
+antes de retornar o primeiro erro. ULT continua apenas notificando a aplicação.
+As APIs novas têm as mesmas restrições de mutex, wake e contexto de tarefa.
+
+A aplicação também pode usar ULT exclusivamente como telemetria, inclusive para
+contextos desconhecidos: essa escolha pertence ao consumidor, não altera o
+comportamento do driver e não elimina os erros retornados pelas APIs de atuação.
+Consulte [CHANGELOG.md](CHANGELOG.md) para as mudanças de frenagem/coast,
+compatibilidade e limites da validação.

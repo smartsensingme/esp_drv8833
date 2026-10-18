@@ -249,3 +249,8 @@ esp_err_t drv8833_pwm_delete(drv8833_pwm_t *p) {
   free(p);
   return first;
 }
+
+/* Explicit static HIGH for active braking; command layer owns serialization. */
+esp_err_t drv8833_pwm_force_high(drv8833_pwm_t *p, unsigned index) {
+  return mcpwm_generator_set_force_level(p->generators[index], 1, true);
+}

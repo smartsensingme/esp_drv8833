@@ -57,6 +57,9 @@ typedef enum {
   /** Nonzero command changes sign, including the intermediate coast interval.
    */
   ESP_DRV8833_FAULT_CONTEXT_REVERSAL,
+
+  /** Explicit active-brake transition (both inputs HIGH). */
+  ESP_DRV8833_FAULT_CONTEXT_BRAKE,
 } esp_drv8833_fault_context_t;
 
 /** Immutable value snapshot of one accepted ULT signal.
@@ -250,6 +253,11 @@ typedef struct {
    * command values may describe an older successful state; inspect API errors.
    */
   esp_err_t last_stop_error;
+
+  /** Both bridges successfully commanded to electrical brake; no speed claim.
+   * Cleared after successful coast/drive. Partial hardware failures can leave
+   * cached state stale; inspect return codes and last_stop_error. */
+  bool braking;
 } esp_drv8833_state_t;
 
 /**
@@ -320,6 +328,27 @@ esp_err_t esp_drv8833_set_speed(esp_drv8833_handle_t driver,
  * esp_drv8833_set_speed().
  */
 esp_err_t esp_drv8833_coast(esp_drv8833_handle_t driver);
+
+/** Apply electrical braking on both wheels (IN1..4 HIGH), with EEP awake.
+ * Task-only external entry, serialized by the command mutex (20-ms tick-rounded
+ * wait). No allocation/logging; wake may busy-wait 1000 us. First forces all
+ * inputs LOW, wakes, then forces each input HIGH. Writes are sequential, so
+ * intermediate drive states can occur; verify transition pulses on hardware.
+ * Returns INVALID_ARG for NULL, TIMEOUT on lock, INVALID_STATE when closing,
+ * or first peripheral error, with best-effort coast/sleep on error.
+ * ULT is still notification-only. No internal timer or speed regulation:
+ * application MUST schedule a finite brake timeout and then coast/sleep,
+ * including on sensor failures. Do not leave the bridge braking indefinitely.
+ * Next successful drive/coast/delete ends braking; cached duties become zero.
+ */
+esp_err_t esp_drv8833_brake(esp_drv8833_handle_t driver);
+
+/** Explicit freewheel with EEP awake (IN1..4 LOW), unlike legacy coast which
+ * also sleeps when EEP exists. Same task/lock/errors/wake delay as brake.
+ * No automatic sleep timeout; application chooses subsequent sleep using coast.
+ * Without EEP this is ordinary coast. No allocation or internal timer.
+ */
+esp_err_t esp_drv8833_coast_awake(esp_drv8833_handle_t driver);
 
 /**
  * @brief Acknowledge only the ULT latch and rearm the next notification.

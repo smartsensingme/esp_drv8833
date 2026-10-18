@@ -242,10 +242,10 @@ static void signal_fault(esp_drv8833_handle_t d) {
  * updates independently on a successful pin write. Repeated cached stop does
  * not renew COAST association. No ULT latch is set by a peripheral error.
  */
-static esp_err_t stop_locked(esp_drv8833_handle_t d) {
+static esp_err_t stop_locked(esp_drv8833_handle_t d, bool sleep) {
   /* Transition block: do not extend the window for an already-stopped cache. */
-  bool changed = d->direction[0] != 0 || d->direction[1] != 0 ||
-                 (d->sleep_ready && !d->state.sleeping);
+  bool changed = d->state.braking || d->direction[0] != 0 ||
+                 d->direction[1] != 0 || (d->sleep_ready && !d->state.sleeping);
   if (changed)
     transition_begin(d, ESP_DRV8833_FAULT_CONTEXT_COAST);
 
@@ -257,7 +257,7 @@ static esp_err_t stop_locked(esp_drv8833_handle_t d) {
     if (first == ESP_OK)
       first = e;
   }
-  if (d->sleep_ready) {
+  if (sleep && d->sleep_ready) {
     esp_err_t e = gpio_set_level(d->config.sleep_gpio, 0);
     if (e == ESP_OK)
       d->state.sleeping = true;
@@ -269,6 +269,7 @@ static esp_err_t stop_locked(esp_drv8833_handle_t d) {
    */
   d->state.last_stop_error = first;
   if (first == ESP_OK) {
+    d->state.braking = false;
     d->state.left_percent = 0.0f;
     d->state.right_percent = 0.0f;
     d->direction[0] = d->direction[1] = 0;
@@ -598,8 +599,15 @@ esp_err_t esp_drv8833_set_speed(esp_drv8833_handle_t d, float right,
   /* Zero-command block: common stop/sleep semantics also cover the
    * esp_drv8833_coast() wrapper. */
   if (right == 0.0f && left == 0.0f) {
-    err = stop_locked(d);
+    err = stop_locked(d, true);
     goto done;
+  }
+
+  /* Leave explicit brake through all-low coast before applying signed drive. */
+  if (d->state.braking) {
+    err = stop_locked(d, false);
+    if (err != ESP_OK)
+      goto fail;
   }
 
   /* Mapping block: right/left identity is independent of physical wiring
@@ -671,11 +679,64 @@ esp_err_t esp_drv8833_set_speed(esp_drv8833_handle_t d, float right,
    * separately. */
 
 fail:
-  stop_locked(d);
+  stop_locked(d, true);
 
 done:
   if (transition)
     transition_end(d);
+  xSemaphoreGive(d->mutex);
+  return err;
+}
+
+/** External explicit brake entry. Driver owns electrical writes; the robot
+ * owner owns the finite duration and all fault-to-coast policy. */
+esp_err_t esp_drv8833_brake(esp_drv8833_handle_t d) {
+  if (!d)
+    return ESP_ERR_INVALID_ARG;
+  if (!take(d))
+    return ESP_ERR_TIMEOUT;
+  esp_err_t err = ESP_ERR_INVALID_STATE;
+  if (d->closing)
+    goto done;
+  err = stop_locked(d, false);
+  if (err != ESP_OK)
+    goto fail;
+  transition_begin(d, ESP_DRV8833_FAULT_CONTEXT_BRAKE);
+  err = wake_locked(d);
+  if (err == ESP_OK) {
+    for (unsigned i = 0; i < 4; ++i) {
+      err = drv8833_pwm_force_high(d->pwm, i);
+      if (err != ESP_OK)
+        break;
+    }
+  }
+  transition_end(d);
+  if (err != ESP_OK)
+    goto fail;
+  d->state.braking = true;
+  goto done;
+fail:
+  stop_locked(d, true);
+done:
+  xSemaphoreGive(d->mutex);
+  return err;
+}
+
+/** External freewheel entry with explicit awake policy. */
+esp_err_t esp_drv8833_coast_awake(esp_drv8833_handle_t d) {
+  if (!d)
+    return ESP_ERR_INVALID_ARG;
+  if (!take(d))
+    return ESP_ERR_TIMEOUT;
+  esp_err_t err = ESP_ERR_INVALID_STATE;
+  if (d->closing)
+    goto done;
+  err = stop_locked(d, false);
+  if (err == ESP_OK)
+    err = wake_locked(d);
+  if (err != ESP_OK)
+    stop_locked(d, true);
+done:
   xSemaphoreGive(d->mutex);
   return err;
 }
@@ -774,7 +835,7 @@ esp_err_t esp_drv8833_delete(esp_drv8833_handle_t d) {
 
   /* Shutdown block: disallow new commands before releasing the task mutex. */
   d->closing = true;
-  esp_err_t first = stop_locked(d);
+  esp_err_t first = stop_locked(d, true);
   xSemaphoreGive(d->mutex);
 
   /* ISR teardown block: keep state allocated if handler removal cannot be

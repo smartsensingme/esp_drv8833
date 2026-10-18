@@ -200,3 +200,8 @@ esp_err_t drv8833_pwm_delete(drv8833_pwm_t *p) {
   free(p);
   return first;
 }
+
+/* Explicit static HIGH for active braking, independent of duty resolution. */
+esp_err_t drv8833_pwm_force_high(drv8833_pwm_t *p, unsigned index) {
+  return ledc_stop(LEDC_LOW_SPEED_MODE, p->first + index, 1);
+}

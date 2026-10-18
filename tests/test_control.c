@@ -40,6 +40,7 @@ struct drv8833_pwm {
 };
 static drv8833_pwm_t *active_pwm;
 static bool fail_once;
+static int fail_high_index = -1;
 static unsigned writes;
 static void (*on_pwm_write)(void);
 
@@ -57,10 +58,21 @@ esp_err_t drv8833_pwm_set(drv8833_pwm_t *p, unsigned i, float duty) {
   }
   p->duty[i] = duty;
   /* No bridge should ever have both inputs active, including reversal. */
-  assert(p->duty[0] == 0.0f || p->duty[1] == 0.0f);
-  assert(p->duty[2] == 0.0f || p->duty[3] == 0.0f);
+  assert(p->duty[0] == 0.0f || p->duty[1] == 0.0f ||
+         (p->duty[0] == 100.0f && p->duty[1] == 100.0f));
+  assert(p->duty[2] == 0.0f || p->duty[3] == 0.0f ||
+         (p->duty[2] == 100.0f && p->duty[3] == 100.0f));
   if (on_pwm_write)
     on_pwm_write();
+  return ESP_OK;
+}
+esp_err_t drv8833_pwm_force_high(drv8833_pwm_t *p, unsigned i) {
+  if (fail_once || fail_high_index == (int)i) {
+    fail_once = false;
+    fail_high_index = -1;
+    return ESP_FAIL;
+  }
+  p->duty[i] = 100.0f;
   return ESP_OK;
 }
 esp_err_t drv8833_pwm_delete(drv8833_pwm_t *p) {
@@ -292,6 +304,43 @@ int main(void) {
   assert(esp_drv8833_delete(d) == ESP_OK);
   c.in2_gpio = c.in1_gpio;
   assert(esp_drv8833_create(&c, &d) == ESP_ERR_INVALID_ARG && d == NULL);
+  c = board();
+  c.on_fault = NULL;
+  c.fault_gpio = -1;
+  assert(esp_drv8833_create(&c, &d) == ESP_OK);
+  assert(esp_drv8833_brake(NULL) == ESP_ERR_INVALID_ARG);
+  assert(esp_drv8833_coast_awake(NULL) == ESP_ERR_INVALID_ARG);
+  assert(esp_drv8833_brake(d) == ESP_OK);
+  for (unsigned i = 0; i < 4; i++)
+    assert(active_pwm->duty[i] == 100.0f);
+  assert(esp_drv8833_get_state(d, &s) == ESP_OK && s.braking && !s.sleeping);
+  assert(s.left_percent == 0.0f && s.right_percent == 0.0f);
+  assert(esp_drv8833_set_speed(d, -20, 30) == ESP_OK);
+  assert(esp_drv8833_get_state(d, &s) == ESP_OK && !s.braking);
+  assert(esp_drv8833_brake(d) == ESP_OK);
+  assert(esp_drv8833_coast_awake(d) == ESP_OK);
+  assert(esp_drv8833_get_state(d, &s) == ESP_OK && !s.braking && !s.sleeping);
+  for (unsigned i = 0; i < 4; i++)
+    assert(active_pwm->duty[i] == 0.0f);
+  assert(mock_levels[c.sleep_gpio] == 1);
+  assert(esp_drv8833_coast(d) == ESP_OK);
+  assert(esp_drv8833_get_state(d, &s) == ESP_OK && s.sleeping);
+  for (int i = 0; i < 4; i++) {
+    fail_high_index = i;
+    assert(esp_drv8833_brake(d) == ESP_FAIL);
+    stopped();
+    assert(esp_drv8833_get_state(d, &s) == ESP_OK && !s.braking);
+  }
+  fail_once = true;
+  assert(esp_drv8833_brake(d) == ESP_FAIL);
+  stopped();
+  assert(esp_drv8833_brake(d) == ESP_OK);
+  assert(esp_drv8833_delete(d) == ESP_OK);
+  c.sleep_gpio = -1;
+  assert(esp_drv8833_create(&c, &d) == ESP_OK);
+  assert(esp_drv8833_brake(d) == ESP_OK);
+  assert(esp_drv8833_coast_awake(d) == ESP_OK);
+  assert(esp_drv8833_delete(d) == ESP_OK);
   test_contexts();
   puts("control policy and ULT context tests passed");
 }

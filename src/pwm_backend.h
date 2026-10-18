@@ -48,3 +48,9 @@ esp_err_t drv8833_pwm_set(drv8833_pwm_t *pwm, unsigned index, float duty);
  * Task-only.
  */
 esp_err_t drv8833_pwm_delete(drv8833_pwm_t *pwm);
+
+/** Internal-only static HIGH force for brake; no PWM endpoint ambiguity.
+ * Caller holds command mutex, index 0..3. Returns first IDF error, no
+ * allocation. Implemented by LEDC stop(idle=1) or MCPWM persistent HIGH force.
+ */
+esp_err_t drv8833_pwm_force_high(drv8833_pwm_t *pwm, unsigned index);
